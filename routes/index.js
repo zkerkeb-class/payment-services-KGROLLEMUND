@@ -267,9 +267,28 @@ router.get('/plans', async (req, res) => {
   }
 });
 
-router.get('/health', (req, res) => {
-  console.log('🏥 Route de santé du service de paiement appelée');
-  res.json({ status: 'ok', service: 'payment-service' });
+// Route de santé pour vérifier la connexion à la BDD
+router.get('/health', async (req, res) => {
+  try {
+    // Log de la variable d'environnement
+    console.log(`🔍 URL de la BDD configurée: ${process.env.DB_SERVICE_URL}`);
+    
+    // Appel au service de base de données
+    const response = await axios.get(`${process.env.DB_SERVICE_URL}/health`);
+    
+    if (response.status === 200) {
+      res.status(200).json({ status: 'ok', db_status: response.data });
+    } else {
+      res.status(500).json({ error: 'Échec de connexion à la BDD' });
+    }
+  } catch (error) {
+    console.error('❌ Erreur lors du test de connexion à la BDD:', error.message);
+    res.status(500).json({ 
+      success: false, 
+      error: 'Échec de connexion à la BDD',
+      details: error.message
+    });
+  }
 });
 
 // Route de test pour la communication avec la BDD

@@ -2,8 +2,10 @@ const stripe = require('stripe')(process.env.STRIPE_SECRET_KEY);
 const axios = require('axios');
 
 // Configuration de l'URL du service de base de données et notification
-const DB_SERVICE_URL = process.env.DB_SERVICE_URL || 'http://localhost:3004';
-const NOTIFICATION_SERVICE_URL = process.env.NOTIFICATION_SERVICE_URL || 'http://localhost:3006';
+console.log('DB_SERVICE_URL', process.env.DB_SERVICE_URL);
+console.log('NOTIFICATION_SERVICE_URL', process.env.NOTIFICATION_SERVICE_URL);
+const DB_SERVICE_URL = process.env.DB_SERVICE_URL;
+const NOTIFICATION_SERVICE_URL = process.env.NOTIFICATION_SERVICE_URL;
 
 // Plans d'abonnement (à configurer dans Stripe)
 const SUBSCRIPTION_PLANS = {
@@ -143,7 +145,7 @@ const handleCheckoutSessionCompleted = async (session) => {
     // Récupérer l'ID de l'utilisateur depuis la base de données
     try {
       console.log(`🔍 Récupération de l'utilisateur depuis la BDD pour ${userEmail}`);
-      const userResponse = await axios.get(`${DB_SERVICE_URL}/users/email/${userEmail}`);
+      const userResponse = await axios.get(`${DB_SERVICE_URL}/api/users/email/${userEmail}`);
       userId = userResponse.data.id;
       console.log(`✅ ID utilisateur récupéré: ${userId}`);
     } catch (error) {
@@ -190,7 +192,7 @@ const handleCheckoutSessionCompleted = async (session) => {
       let subscriptionId;
       try {
         // S'assurer que l'URL est correcte
-        const subscriptionsUrl = `${DB_SERVICE_URL}/subscriptions`;
+        const subscriptionsUrl = `${DB_SERVICE_URL}/api/subscriptions`;
         console.log(`📌 URL d'envoi: ${subscriptionsUrl}`);
         
         const subscriptionResponse = await axios.post(subscriptionsUrl, subscriptionData);
@@ -220,14 +222,14 @@ const handleCheckoutSessionCompleted = async (session) => {
     console.log(`🔄 Mise à jour directe du statut d'abonnement pour ${userEmail}`);
     try {
       // Mise à jour de l'utilisateur via l'API du service de BDD
-      const userResponse = await axios.get(`${DB_SERVICE_URL}/users/email/${userEmail}`);
+      const userResponse = await axios.get(`${DB_SERVICE_URL}/api/users/email/${userEmail}`);
       const userId = userResponse.data.id;
       
-      await axios.put(`${DB_SERVICE_URL}/users/subscription/${userEmail}`, {
+      await axios.put(`${DB_SERVICE_URL}/api/users/subscription/${userEmail}`, {
         isSubscribed: true,
         subscriptionId: session.subscription,
         numSubscriptionId: subscriptionId,
-        subscriptionEndDate: subscription?.current_period_end ? new Date(subscription.current_period_end * 1000).toISOString() : null
+        subscriptionEndDate: session.current_period_end ? new Date(session.current_period_end * 1000).toISOString() : null
       });
       
       console.log(`✅ Statut d'abonnement mis à jour pour ${userEmail} (isSubscribed=true)`);
@@ -267,30 +269,37 @@ const handleCheckoutSessionCompleted = async (session) => {
  */
 const handleInvoicePaid = async (invoice) => {
   try {
-    let userEmail, subscription;
+    console.log(`🔄 handleInvoicePaid - Début du traitement - Facture ID: ${invoice.id}`);
+    const subscriptionId = invoice.subscription;
     
-    // Vérifier si c'est un test
-    if (invoice._customerMock && invoice._customerMock.email) {
-      console.log(`🧪 Mode test détecté pour invoice.paid avec email: ${invoice._customerMock.email}`);
-      userEmail = invoice._customerMock.email;
-      subscription = { current_period_end: Math.floor(Date.now() / 1000) + 2592000 }; // +30 jours
-    } else {
-      subscription = await stripe.subscriptions.retrieve(invoice.subscription);
-      const customer = await stripe.customers.retrieve(invoice.customer);
-      userEmail = customer.email;
+    // Vérifier si l'ID de l'abonnement est présent
+    if (!subscriptionId) {
+      console.log('Facture sans abonnement associé, ignorée.');
+      return;
     }
     
-    // Mise à jour de la date de fin d'abonnement
-    const subscriptionEnd = new Date(subscription.current_period_end * 1000);
-    await updateUserSubscriptionEnd(userEmail, subscriptionEnd);
+    console.log(`🔍 Récupération de l'abonnement Stripe: ${subscriptionId}`);
+    const subscription = await stripe.subscriptions.retrieve(subscriptionId);
     
-    // Envoi de la facture par e-mail
-    await sendInvoiceEmail(userEmail, invoice);
+    // Mettre à jour le statut dans la BDD
+    console.log(`🔄 Mise à jour du statut de l'abonnement dans la BDD: ${subscriptionId}`);
+    await updateUserSubscriptionStatus(invoice.customer_email, true, subscriptionId);
     
-    console.log(`Facture payée pour ${userEmail}, abonnement valide jusqu'au ${subscriptionEnd}`);
+    // Mise à jour de la date de fin
+    const endDate = new Date(subscription.current_period_end * 1000);
+    console.log(`📅 Mise à jour de la date de fin d'abonnement: ${endDate.toISOString()}`);
+    await updateUserSubscriptionEnd(invoice.customer_email, endDate);
+    
+    // Envoyer une notification de renouvellement
+    console.log(`🔔 Envoi de notification 'renewed' à ${invoice.customer_email}`);
+    await sendSubscriptionNotification(invoice.customer_email, 'renewed', {
+      subscriptionId,
+      endDate: endDate.toISOString()
+    });
+    
   } catch (error) {
     console.error('Erreur lors du traitement de invoice.paid:', error);
-    throw error;
+    // Ne pas relancer pour éviter que Stripe ne renvoie le webhook
   }
 };
 
@@ -299,28 +308,15 @@ const handleInvoicePaid = async (invoice) => {
  */
 const handlePaymentFailed = async (invoice) => {
   try {
-    let userEmail;
-    
-    // Vérifier si c'est un test
-    if (invoice._customerMock && invoice._customerMock.email) {
-      console.log(`🧪 Mode test détecté pour invoice.payment_failed avec email: ${invoice._customerMock.email}`);
-      userEmail = invoice._customerMock.email;
-    } else {
-      const customer = await stripe.customers.retrieve(invoice.customer);
-      userEmail = customer.email;
-    }
-    
-    // Notifier l'utilisateur de l'échec du paiement
-    await sendSubscriptionNotification(userEmail, 'payment_failed', {
+    console.log('🔄 handlePaymentFailed - Traitement du paiement échoué');
+    await sendSubscriptionNotification(invoice.customer_email, 'payment_failed', {
       invoiceId: invoice.id,
-      amountDue: invoice.amount_due / 100,
+      amountDue: (invoice.amount_due / 100).toFixed(2),
       currency: invoice.currency
     });
-    
-    console.log(`Échec de paiement pour ${userEmail}`);
   } catch (error) {
-    console.error('Erreur lors du traitement de invoice.payment_failed:', error);
-    throw error;
+    console.error('Erreur lors du traitement de payment_failed:', error);
+    // Ne pas relancer pour éviter de bloquer les autres webhooks
   }
 };
 
@@ -329,139 +325,120 @@ const handlePaymentFailed = async (invoice) => {
  */
 const handleSubscriptionUpdated = async (subscription) => {
   try {
-    let userEmail;
+    console.log(`🔄 handleSubscriptionUpdated - Traitement de la mise à jour de l'abonnement: ${subscription.id}`);
+    const customer = await stripe.customers.retrieve(subscription.customer);
     
-    // Vérifier si c'est un test
-    if (subscription._customerMock && subscription._customerMock.email) {
-      console.log(`🧪 Mode test détecté pour subscription.updated avec email: ${subscription._customerMock.email}`);
-      userEmail = subscription._customerMock.email;
-    } else {
-      const customer = await stripe.customers.retrieve(subscription.customer);
-      userEmail = customer.email;
+    // 1. Récupérer l'abonnement de notre BDD via l'ID de l'abonnement Stripe
+    const bddSubscriptionResponse = await axios.get(`${DB_SERVICE_URL}/api/subscriptions/stripe/${subscription.id}`);
+    const bddSubscription = bddSubscriptionResponse.data;
+
+    if (!bddSubscription) {
+      console.error(`❌ Erreur: Abonnement Stripe ${subscription.id} non trouvé dans notre BDD.`);
+      return;
     }
+
+    // 2. Préparer les données de mise à jour
+    const subscriptionData = {
+      status: subscription.status,
+      isActive: subscription.status === 'active',
+      autoRenew: !subscription.cancel_at_period_end,
+      endDate: new Date((subscription.cancel_at || subscription.current_period_end) * 1000)
+    };
     
+    // 3. Mettre à jour l'abonnement dans notre BDD en utilisant son ID interne (UUID) et la méthode PATCH
+    await axios.patch(`${DB_SERVICE_URL}/api/subscriptions/${bddSubscription.internalId}`, subscriptionData);
+
+    // Mettre à jour le statut de l'utilisateur pour l'annulation immédiate
     if (subscription.cancel_at_period_end) {
-      // L'abonnement est programmé pour être annulé à la fin de la période
-      await sendSubscriptionNotification(userEmail, 'cancellation_scheduled', {
-        endDate: new Date(subscription.current_period_end * 1000)
-      });
-    } else if (subscription.status === 'active' && subscription.cancel_at_period_end === false) {
-      // L'abonnement a été réactivé
-      await sendSubscriptionNotification(userEmail, 'reactivated');
+      await updateUserSubscriptionStatus(customer.email, false, subscription.id);
     }
     
-    console.log(`Abonnement mis à jour pour ${userEmail}, statut: ${subscription.status}`);
+    // Envoyer la notification appropriée
+    if (subscription.cancel_at_period_end) {
+      await sendSubscriptionNotification(customer.email, 'cancelled', {
+        subscriptionId: subscription.id,
+        endDate: new Date(subscription.cancel_at * 1000).toISOString()
+      });
+    } else {
+      await sendSubscriptionNotification(customer.email, 'updated', {
+        subscriptionId: subscription.id,
+        newStatus: subscription.status
+      });
+    }
+
   } catch (error) {
-    console.error('Erreur lors du traitement de customer.subscription.updated:', error);
-    throw error;
+    console.error('Erreur lors du traitement de subscription.updated:', error);
   }
 };
 
 /**
  * Gère la suppression d'un abonnement
+ * (quand il arrive VRAIMENT à son terme)
  */
 const handleSubscriptionDeleted = async (subscription) => {
   try {
-    let userEmail;
+    console.log(`🔄 handleSubscriptionDeleted - Traitement de la suppression de l'abonnement: ${subscription.id}`);
     
-    // Vérifier si c'est un test
-    if (subscription._customerMock && subscription._customerMock.email) {
-      console.log(`🧪 Mode test détecté pour subscription.deleted avec email: ${subscription._customerMock.email}`);
-      userEmail = subscription._customerMock.email;
-    } else {
-      const customer = await stripe.customers.retrieve(subscription.customer);
-      userEmail = customer.email;
+    // 1. Récupérer l'abonnement de notre BDD via l'ID de l'abonnement Stripe
+    const bddSubscriptionResponse = await axios.get(`${DB_SERVICE_URL}/api/subscriptions/stripe/${subscription.id}`);
+    const bddSubscription = bddSubscriptionResponse.data;
+
+    if (!bddSubscription) {
+      console.error(`❌ Erreur: Abonnement Stripe ${subscription.id} non trouvé dans notre BDD.`);
+      return;
     }
-    
-    // Mettre à jour directement l'utilisateur dans la BDD sans passer par updateUserSubscriptionStatus
-    console.log(`🔄 Mise à jour directe du statut d'abonnement pour ${userEmail} (suppression)`);
-    try {
-      await axios.put(`${DB_SERVICE_URL}/users/subscription/${userEmail}`, {
-        isSubscribed: false,
-        subscriptionId: null,
-        subscriptionEndDate: new Date().toISOString()
-      });
-      console.log(`✅ Statut d'abonnement mis à jour pour ${userEmail} (isSubscribed=false)`);
-    } catch (updateError) {
-      console.error(`❌ Erreur lors de la mise à jour du statut d'abonnement:`, updateError.message);
-      // Ne pas arrêter le processus en cas d'erreur
-    }
-    
-    // Notifier l'utilisateur de la fin de son abonnement
-    console.log(`🔔 Envoi de notification 'ended' à ${userEmail}`);
-    await sendSubscriptionNotification(userEmail, 'ended', {
-      subscriptionId: subscription.id,
-      endDate: new Date().toISOString()
+
+    const customer = await stripe.customers.retrieve(subscription.customer);
+
+    // 2. Mettre à jour le statut dans la BDD
+    await axios.put(`${DB_SERVICE_URL}/api/subscriptions/${bddSubscription.id}`, {
+      status: 'deleted',
+      isActive: false
     });
+
+    // 3. Mettre à jour le statut de l'utilisateur
+    await updateUserSubscriptionStatus(customer.email, false, null);
     
-    console.log(`✅ Abonnement terminé pour ${userEmail}`);
   } catch (error) {
-    console.error('Erreur lors du traitement de customer.subscription.deleted:', error);
-    throw error;
+    console.error('Erreur lors du traitement de subscription.deleted:', error);
   }
 };
 
 /**
- * Met à jour le statut d'abonnement de l'utilisateur dans la base de données
+ * Met à jour le statut de l'abonnement dans le service de base de données
  */
 const updateUserSubscriptionStatus = async (userEmail, isSubscribed, subscriptionId = null) => {
   try {
-    console.log(`🔄 Mise à jour du statut d'abonnement pour ${userEmail} (isSubscribed=${isSubscribed})`);
+    console.log(`🔄 Mise à jour du statut d'abonnement pour ${userEmail}: isSubscribed=${isSubscribed}`);
     
-    // Récupérer l'utilisateur par email
-    const userResponse = await axios.get(`${DB_SERVICE_URL}/users/email/${userEmail}`);
-    const userId = userResponse.data.id;
-    console.log(`✅ Utilisateur trouvé pour ${userEmail}, ID: ${userId}`);
+    // Utiliser la route correcte: /api/users/subscription/:email
+    await axios.put(`${DB_SERVICE_URL}/api/users/subscription/${userEmail}`, {
+      isSubscribed,
+      stripeSubscriptionId: subscriptionId
+    });
     
-    // Mettre à jour l'utilisateur en utilisant la route subscription avec l'email
-    const updateData = {
-      isSubscribed: isSubscribed
-    };
-    
-    if (subscriptionId) {
-      updateData.subscriptionId = subscriptionId;
-    }
-    
-    console.log(`🔄 Mise à jour de l'utilisateur ${userId} avec:`, JSON.stringify(updateData, null, 2));
-    await axios.put(`${DB_SERVICE_URL}/users/subscription/${userEmail}`, updateData);
-    console.log(`✅ Statut d'abonnement mis à jour pour ${userEmail} (isSubscribed=${isSubscribed})`);
-    
-    return { success: true };
+    console.log(`✅ Statut d'abonnement mis à jour pour ${userEmail}`);
   } catch (error) {
-    console.error(`❌ Erreur lors de la mise à jour du statut d'abonnement pour ${userEmail}:`, error.message);
-    if (error.response) {
-      console.error('Détails de l\'erreur:', error.response.data);
-    }
+    console.error('❌ Erreur lors de la mise à jour du statut de l\'abonnement:', error.response?.data || error.message);
     throw error;
   }
 };
 
 /**
- * Met à jour la date de fin d'abonnement de l'utilisateur
+ * Met à jour la date de fin de l'abonnement dans le service de base de données
  */
 const updateUserSubscriptionEnd = async (email, subscriptionEndDate) => {
   try {
-    // En mode de test (avec un email mais sans l'URL de la base de données), simuler plutôt qu'échouer
-    if (!DB_SERVICE_URL || DB_SERVICE_URL.includes('undefined')) {
-      console.log(`🧪 Mode test: mise à jour de la date de fin d'abonnement simulée pour ${email} (${subscriptionEndDate.toISOString()})`);
-      return;
-    }
+    console.log(`📅 Mise à jour de la date de fin d'abonnement pour ${email}`);
     
-    try {
-      await axios.put(`${DB_SERVICE_URL}/users/subscription/${email}`, {
-        subscriptionEndDate: subscriptionEndDate.toISOString()
-      });
-      console.log(`✅ Date de fin d'abonnement mise à jour pour ${email} (${subscriptionEndDate.toISOString()})`);
-    } catch (error) {
-      console.error(`❌ Erreur lors de la mise à jour de la date de fin d'abonnement dans la base de données:`, error.message);
-      if (error.code === 'ECONNREFUSED' || error.code === 'ENOTFOUND') {
-        console.log(`⚠️ Service de base de données non disponible. Mode test: simulation de la mise à jour.`);
-      } else {
-        throw error;
-      }
-    }
+    // Utiliser la route correcte: /api/users/subscription/:email
+    await axios.put(`${DB_SERVICE_URL}/api/users/subscription/${email}`, {
+      subscriptionEndDate: subscriptionEndDate.toISOString()
+    });
+    
+    console.log(`✅ Date de fin mise à jour pour ${email}`);
   } catch (error) {
-    console.error('Erreur lors de la mise à jour de la date de fin d\'abonnement:', error);
+    console.error('❌ Erreur lors de la mise à jour de la date de fin d\'abonnement:', error.response?.data || error.message);
     throw error;
   }
 };
@@ -470,230 +447,92 @@ const updateUserSubscriptionEnd = async (email, subscriptionEndDate) => {
  * Envoie une notification à l'utilisateur concernant son abonnement
  */
 const sendSubscriptionNotification = async (email, type, data = {}) => {
-    const maxRetries = 3;
-    const initialBackoff = 1000; // 1 second
-    let currentRetry = 0;
+  try {
+    console.log(`🔔 Tentative d'envoi de la notification de type '${type}' à ${email}`);
+    let retries = 3;
+    let delay = 1000;
     
-    // Debug: Afficher l'URL du service de notification
-    console.log(`🔍 DEBUG - sendSubscriptionNotification`);
-    console.log(`📧 Email destinataire: ${email}`);
-    console.log(`🏷️ Type de notification: ${type}`);
-    console.log(`🔌 URL du service de notification: ${NOTIFICATION_SERVICE_URL}`);
-    
-    // Vérifier si l'email est valide
-    if (!email || typeof email !== 'string' || !email.includes('@')) {
-        console.error(`❌ Erreur: Email invalide ou manquant: "${email}"`);
-        throw new Error(`Email invalide ou manquant: "${email}"`);
-    }
-    
-    // Déterminer le point de terminaison de la notification en fonction du type
-    let endpointPath = '';
-    let payload = {};
-    
-    // Configurer l'endpoint et le payload en fonction du type
-    switch (type) {
-        case 'new':
-            endpointPath = '/notifications/subscription/start';
-            payload = {
-                email,
-                subscriptionData: {
-                    subscriptionId: data.subscriptionId,
-                    planType: data.planType || 'Premium',
-                    startDate: data.startDate || new Date().toISOString(),
-                    endDate: data.endDate || new Date(Date.now() + 30*24*60*60*1000).toISOString()
-                }
-            };
-            break;
-        case 'ended':
-        case 'cancelled':
-            endpointPath = '/notifications/subscription/cancelled';
-            payload = {
-                email,
-                subscriptionData: {
-                    subscriptionId: data.subscriptionId,
-                    endDate: data.endDate || new Date().toISOString()
-                }
-            };
-            break;
-        case 'payment_failed':
-            endpointPath = '/notifications/subscription/payment-failed';
-            payload = {
-                email,
-                paymentData: {
-                    amountDue: data.amountDue || '?',
-                    currency: data.currency || 'EUR',
-                    invoiceId: data.invoiceId || 'N/A'
-                }
-            };
-            break;
-        case 'cancellation_scheduled':
-            endpointPath = '/notifications/subscription/expiring-soon';
-            payload = {
-                email,
-                subscriptionData: {
-                    endDate: data.endDate || new Date(Date.now() + 30*24*60*60*1000).toISOString()
-                }
-            };
-            break;
-        case 'reactivated':
-            endpointPath = '/notifications/subscription/reactivated';
-            payload = {
-                email,
-                subscriptionData: {}
-            };
-            break;
-        default:
-            console.error(`❌ Type de notification non pris en charge: ${type}`);
-            throw new Error(`Type de notification non pris en charge: ${type}`);
-    }
-    
-    if (!endpointPath) {
-        console.error(`❌ Erreur: Impossible de déterminer l'endpoint pour le type "${type}"`);
-        throw new Error(`Type de notification non pris en charge: ${type}`);
-    }
-    
-    console.log(`🔄 Endpoint de notification choisi: ${endpointPath}`);
-    console.log(`📦 Payload préparé:`, JSON.stringify(payload, null, 2));
-    
-    // Fonction pour tenter l'envoi avec retries
-    const attemptSend = async () => {
-        try {
-            console.log(`🔔 [Tentative ${currentRetry + 1}/${maxRetries + 1}] Envoi de notification de type "${type}" à ${email}`);
-            console.log(`📨 URL complète: ${NOTIFICATION_SERVICE_URL}${endpointPath}`);
-            
-            // Test de connectivité au service de notification
-            try {
-                console.log(`🔄 Test de connexion au service avant envoi: ${NOTIFICATION_SERVICE_URL}/health`);
-                await axios.get(`${NOTIFICATION_SERVICE_URL}/health`);
-                console.log(`✅ Service de notification accessible!`);
-            } catch (connError) {
-                console.error(`❌ Service de notification inaccessible avant envoi:`, connError.message);
-                throw new Error(`Service de notification inaccessible: ${connError.message}`);
-            }
-            
-            const response = await axios.post(`${NOTIFICATION_SERVICE_URL}${endpointPath}`, payload, {
-                headers: {
-                    'Content-Type': 'application/json',
-                    'X-Request-ID': `${type}-${new Date().toISOString()}`
-                },
-                timeout: 10000 // 10 secondes de timeout
-            });
-            
-            console.log(`✅ Notification de type "${type}" envoyée à ${email}`);
-            console.log(`📡 Réponse du service: ${JSON.stringify(response.data)}`);
-            return { success: true, data: response.data };
-        } catch (error) {
-            console.error(`❌ Erreur lors de l'envoi de la notification "${type}":`, error.message);
-            
-            if (error.response) {
-                console.error(`📋 Réponse d'erreur: ${JSON.stringify(error.response.data)}`);
-                console.error(`📋 Status: ${error.response.status}`);
-            } else if (error.request) {
-                console.error(`📋 Erreur de requête: Pas de réponse reçue`);
-                console.error(`📋 URL: ${NOTIFICATION_SERVICE_URL}${endpointPath}`);
-                console.error(`📋 Méthode: POST`);
-            } else {
-                console.error(`📋 Erreur de configuration: ${error.message}`);
-            }
-            
-            // Gérer les erreurs de connexion ou de timeout
-            if (
-                error.code === 'ECONNREFUSED' || 
-                error.code === 'ETIMEDOUT' || 
-                error.code === 'ECONNABORTED' ||
-                error.code === 'ENOTFOUND' ||
-                error.message.includes('timeout')
-            ) {
-                console.log(`⚠️ Erreur de connexion détectée: ${error.code || error.message}`);
-                if (currentRetry < maxRetries) {
-                    currentRetry++;
-                    const backoff = initialBackoff * Math.pow(2, currentRetry - 1);
-                    console.log(`⏱️ Attente de ${backoff}ms avant nouvelle tentative (${currentRetry}/${maxRetries})...`);
-                    
-                    // Attendre avec un délai exponentiel
-                    await new Promise(resolve => setTimeout(resolve, backoff));
-                    return attemptSend(); // Tentative supplémentaire récursive
-                }
-            }
-            
-            // Erreur après les tentatives ou autre type d'erreur
-            throw error;
-        }
+    // Définir les endpoints pour chaque type de notification
+    const endpoints = {
+      'new': '/notifications/subscription/start',
+      'renewed': '/notifications/subscription/renewed',
+      'cancelled': '/notifications/subscription/cancelled',
+      'payment_failed': '/notifications/subscription/payment-failed',
+      'updated': '/notifications/subscription/updated'
     };
     
-    // Démarrer les tentatives d'envoi
-    return attemptSend();
+    const endpoint = endpoints[type];
+    
+    if (!endpoint) {
+      console.error(`❌ Type de notification non reconnu: ${type}`);
+      return;
+    }
+
+    const attemptSend = async () => {
+      try {
+        await axios.post(`${NOTIFICATION_SERVICE_URL}${endpoint}`, {
+          email: email,
+          subscriptionData: data
+        });
+        console.log(`✅ Notification de type '${type}' envoyée avec succès à ${email}`);
+      } catch (error) {
+        if (retries > 0) {
+          retries--;
+          console.warn(`⚠️ Échec de l'envoi, nouvelle tentative dans ${delay / 1000}s... (${retries} tentatives restantes)`);
+          await new Promise(res => setTimeout(res, delay));
+          delay *= 2; // Augmenter le délai (backoff exponentiel)
+          await attemptSend();
+        } else {
+          console.error(`❌ Échec de l'envoi de la notification de type '${type}' après plusieurs tentatives:`, error.response?.data || error.message);
+          throw error; // Propager l'erreur après l'échec final
+        }
+      }
+    };
+    
+    await attemptSend();
+  } catch (error) {
+    // Erreur déjà loguée dans attemptSend
+    console.error(`❌ Erreur finale lors de l'envoi de la notification à ${email}`);
+  }
 };
 
 /**
- * Envoie une facture par e-mail
+ * Envoie un email de facture via le service de notification
  */
 const sendInvoiceEmail = async (email, invoice) => {
   try {
-    // Données de facture par défaut pour les tests
-    let invoiceData = {
-      amount: 999, // 9.99 en centimes
-      currency: 'eur',
-      date: new Date().toISOString(),
-      invoiceNumber: 'INV-TEST-' + Date.now(),
-      planName: 'Service Premium (Test)'
-    };
+    console.log(`📧 Tentative d'envoi de l'email de facture à ${email}`);
     
-    // Si ce n'est pas un test, récupérer les vraies données
-    if (!invoice._customerMock) {
-      try {
-        // Récupérer les détails supplémentaires de la facture
-        const retrievedInvoice = await stripe.invoices.retrieve(invoice.id, {
-          expand: ['subscription', 'customer']
-        });
-
-        // Récupérer les détails du plan si possible
-        let planName = 'Service Premium';
-        if (retrievedInvoice.subscription && retrievedInvoice.lines && retrievedInvoice.lines.data.length > 0) {
-          const subscription = await stripe.subscriptions.retrieve(retrievedInvoice.subscription);
-          if (subscription.items && subscription.items.data.length > 0) {
-            const item = subscription.items.data[0];
-            if (item.price) {
-              const price = await stripe.prices.retrieve(item.price.id, { expand: ['product'] });
-              if (price.product && price.product.name) {
-                planName = price.product.name;
-              }
-            }
-          }
-        }
-
-        // Mettre à jour les données de facture
-        invoiceData = {
-          amount: retrievedInvoice.amount_paid,
-          currency: retrievedInvoice.currency,
-          date: new Date(retrievedInvoice.created * 1000).toISOString(),
-          invoiceNumber: retrievedInvoice.number || retrievedInvoice.id,
-          planName
-        };
-      } catch (error) {
-        console.warn(`⚠️ Impossible de récupérer les détails de la facture depuis Stripe: ${error.message}`);
-        console.warn(`⚠️ Utilisation de données de test par défaut à la place`);
-      }
-    } else {
-      console.log(`🧪 Mode test: envoi d'une facture avec des données simulées`);
-    }
-    
-    // Envoyer la facture par e-mail
-    const response = await axios.post(`${NOTIFICATION_SERVICE_URL}/notifications/invoice`, {
+    await axios.post(`${NOTIFICATION_SERVICE_URL}/notifications/invoice`, {
       to: email,
-      invoiceData
+      invoice: {
+        id: invoice.id,
+        amount_paid: invoice.amount_paid / 100,
+        currency: invoice.currency,
+        created: new Date(invoice.created * 1000).toLocaleDateString(),
+        pdf_url: invoice.invoice_pdf
+      }
     });
     
-    console.log(`✅ Facture envoyée à ${email} (${invoiceData.invoiceNumber})`);
-    return response.data;
+    console.log(`✅ Email de facture envoyé à ${email}`);
   } catch (error) {
-    console.error('Erreur lors de l\'envoi de la facture par e-mail:', error);
-    throw error;
+    console.error('❌ Erreur lors de l\'envoi de l\'email de facture:', error.response?.data || error.message);
+    // Ne pas relancer l'erreur pour ne pas bloquer les autres webhooks
   }
 };
 
 module.exports = {
   createSubscriptionSession,
   checkSubscriptionStatus,
-  handleWebhookEvent
+  handleWebhookEvent,
+  // Fonctions exportées pour les tests
+  handleCheckoutSessionCompleted,
+  handleInvoicePaid,
+  handlePaymentFailed,
+  handleSubscriptionUpdated,
+  handleSubscriptionDeleted,
+  updateUserSubscriptionStatus,
+  updateUserSubscriptionEnd,
+  sendSubscriptionNotification,
+  sendInvoiceEmail
 };

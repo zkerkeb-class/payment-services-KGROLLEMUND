@@ -1,8 +1,8 @@
 const stripe = require('stripe')(process.env.STRIPE_SECRET_KEY);
 const axios = require('axios');
 
-const BDD_SERVICE_URL = process.env.BDD_SERVICE_URL || 'http://localhost:3004';
-const NOTIFICATION_SERVICE_URL = process.env.NOTIFICATION_SERVICE_URL || 'http://localhost:3006';
+const BDD_SERVICE_URL = process.env.BDD_SERVICE_URL;
+const NOTIFICATION_SERVICE_URL = process.env.NOTIFICATION_SERVICE_URL;
 
 // Créer un abonnement
 const createSubscription = async (req, res) => {

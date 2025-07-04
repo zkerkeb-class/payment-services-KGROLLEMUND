@@ -1,7 +1,7 @@
 const express = require('express');
 const cors = require('cors');
 const dotenv = require('dotenv');
-const paymentRoutes = require('./routes');
+const routes = require('./routes');
 const fs = require('fs');
 const path = require('path');
 const axios = require('axios');
@@ -17,9 +17,9 @@ console.log('=== Configuration du service de paiement ===');
 console.log('PORT:', process.env.PORT || 3002);
 console.log('STRIPE_SECRET_KEY:', process.env.STRIPE_SECRET_KEY ? 'Configuré (valeur masquée)' : 'Non configuré ⚠️');
 console.log('STRIPE_WEBHOOK_SECRET:', process.env.STRIPE_WEBHOOK_SECRET ? 'Configuré (valeur masquée)' : 'Non configuré ⚠️');
-console.log('NOTIFICATION_SERVICE_URL:', process.env.NOTIFICATION_SERVICE_URL || 'http://localhost:3006');
-console.log('DB_SERVICE_URL:', process.env.DB_SERVICE_URL || 'http://localhost:3004');
-console.log('CLIENT_URL:', process.env.CLIENT_URL || 'http://localhost:3000');
+console.log('NOTIFICATION_SERVICE_URL:', process.env.NOTIFICATION_SERVICE_URL);
+console.log('DB_SERVICE_URL:', process.env.DB_SERVICE_URL);
+console.log('CLIENT_URL:', process.env.CLIENT_URL);
 console.log('MODE:', process.env.NODE_ENV || 'development');
 console.log('=======================================');
 
@@ -86,7 +86,7 @@ app.get('/health', (req, res) => {
 });
 
 // Routes
-app.use('/api/payments', paymentRoutes);
+app.use('/api/payments', routes);
 
 // Middleware Prometheus pour collecter les métriques HTTP
 const metricsMiddleware = promBundle({
@@ -107,7 +107,7 @@ app.get('/metrics', (req, res) => {
 // Initialiser Stripe et démarrer le serveur
 initializeStripe().then(() => {
   app.listen(PORT, () => {
-    console.log(`\n💰 Service de paiement en cours d'exécution sur le port ${PORT}`);
+    console.log(`🚀 Le service de paiement écoute sur le port ${PORT}`);
     
     // Tester la connexion au service de base de données
     const dbUrl = process.env.DB_SERVICE_URL || 'http://localhost:3004';
