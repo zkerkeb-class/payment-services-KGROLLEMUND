@@ -5,6 +5,9 @@ const paymentRoutes = require('./routes');
 const fs = require('fs');
 const path = require('path');
 const axios = require('axios');
+const promBundle = require('express-prom-bundle');
+
+
 
 dotenv.config();
 
@@ -85,6 +88,22 @@ app.get('/health', (req, res) => {
 // Routes
 app.use('/api/payments', paymentRoutes);
 
+// Middleware Prometheus pour collecter les métriques HTTP
+const metricsMiddleware = promBundle({
+  includeMethod: true,
+  includePath: true,
+  includeStatusCode: true,
+  includeUp: true,
+  customLabels: { project_name: 'payment-service' }, // Remplacer par le nom du service
+  promClient: { collectDefaultMetrics: {} }
+});
+app.use(metricsMiddleware);
+
+// Route pour exposer les métriques Prometheus
+app.get('/metrics', (req, res) => {
+  res.set('Content-Type', 'text/plain');
+  res.end(promBundle.promClient.register.metrics());
+});
 // Initialiser Stripe et démarrer le serveur
 initializeStripe().then(() => {
   app.listen(PORT, () => {
