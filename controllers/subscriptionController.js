@@ -9,23 +9,21 @@ const createSubscription = async (req, res) => {
     console.log('🚀 DÉBUT - createSubscription - Requête reçue', JSON.stringify(req.body, null, 2));
     try {
         const { userId, planType, paymentMethodId } = req.body;
-        console.log(`👤 Informations reçues : userId=${userId}, planType=${planType}, paymentMethodId=${paymentMethodId}`);
 
         // Récupérer l'utilisateur
-        console.log(`🔍 Récupération de l'utilisateur depuis ${BDD_SERVICE_URL}/api/users/${userId}`);
         const userResponse = await axios.get(`${BDD_SERVICE_URL}/api/users/${userId}`);
         const user = userResponse.data;
-        console.log(`✅ Utilisateur récupéré : ${user.email}`);
+        console.log(`✅ Utilisateur récupéré`);
 
         // Créer ou récupérer le client Stripe
         let customer;
-        console.log(`🔍 Recherche du client Stripe pour l'email ${user.email}`);
+        console.log(`🔍 Recherche du client Stripe`);
         const customers = await stripe.customers.list({ email: user.email });
         if (customers.data.length > 0) {
             customer = customers.data[0];
-            console.log(`✅ Client Stripe existant trouvé : ${customer.id}`);
+            console.log(`✅ Client Stripe existant trouvé`);
         } else {
-            console.log(`🆕 Création d'un nouveau client Stripe pour ${user.email}`);
+            console.log(`🆕 Création d'un nouveau client Stripe`);
             customer = await stripe.customers.create({
                 email: user.email,
                 payment_method: paymentMethodId,
@@ -33,21 +31,18 @@ const createSubscription = async (req, res) => {
                     default_payment_method: paymentMethodId,
                 },
             });
-            console.log(`✅ Nouveau client Stripe créé : ${customer.id}`);
+            console.log(`✅ Nouveau client Stripe créé`);
         }
 
         // Créer l'abonnement Stripe
-        console.log(`🔍 Création de l'abonnement Stripe pour le plan ${planType}`);
         const priceId = process.env[`STRIPE_${planType.toUpperCase()}_PRICE_ID`];
-        console.log(`🔑 Utilisation du price ID : ${priceId}`);
-        
         const subscription = await stripe.subscriptions.create({
             customer: customer.id,
             items: [{ price: priceId }],
             payment_behavior: 'default_incomplete',
             expand: ['latest_invoice.payment_intent'],
         });
-        console.log(`✅ Abonnement Stripe créé : ${subscription.id}, statut: ${subscription.status}`);
+        console.log(`✅ Abonnement Stripe créé`);
 
         // Calculer la date de fin (30 jours par défaut)
         const endDate = new Date();
@@ -67,16 +62,13 @@ const createSubscription = async (req, res) => {
             status: subscription.status
         };
         
-        console.log(`🔍 Envoi vers la BDD: POST ${BDD_SERVICE_URL}/api/subscriptions`);
-        console.log(`📦 Données d'abonnement à enregistrer:`, JSON.stringify(subscriptionData, null, 2));
         
         try {
             const bddResponse = await axios.post(`${BDD_SERVICE_URL}/api/subscriptions`, subscriptionData);
-            console.log(`✅ Abonnement enregistré dans la BDD, ID: ${bddResponse.data.id}`);
-            console.log(`📦 Réponse BDD:`, JSON.stringify(bddResponse.data, null, 2));
+            console.log(`✅ Abonnement enregistré dans la BDD`);
             
             // Envoyer une notification
-            console.log(`📧 Envoi d'une notification d'abonnement à ${user.email}`);
+            console.log(`📧 Envoi d'une notification d'abonnement`);
             await axios.post(`${NOTIFICATION_SERVICE_URL}/notifications/subscription/start`, {
                 email: user.email,
                 subscriptionData: bddResponse.data
@@ -116,34 +108,32 @@ const createSubscription = async (req, res) => {
 
 // Annuler un abonnement
 const cancelSubscription = async (req, res) => {
-    console.log('🚀 DÉBUT - cancelSubscription - Requête reçue', JSON.stringify(req.params, null, 2));
+    console.log('🚀 DÉBUT - cancelSubscription');
     try {
         const { subscriptionId } = req.params;
-        console.log(`🔍 Annulation de l'abonnement ${subscriptionId}`);
 
         // Récupérer l'abonnement de la BDD
-        console.log(`🔍 Récupération de l'abonnement depuis ${BDD_SERVICE_URL}/api/subscriptions/${subscriptionId}`);
         const subscriptionResponse = await axios.get(`${BDD_SERVICE_URL}/api/subscriptions/${subscriptionId}`);
         const subscription = subscriptionResponse.data;
-        console.log(`✅ Abonnement récupéré, stripeSubscriptionId: ${subscription.stripeSubscriptionId}`);
+        console.log(`✅ Abonnement récupéré`);
 
         // Annuler l'abonnement Stripe
-        console.log(`🔍 Annulation de l'abonnement Stripe ${subscription.stripeSubscriptionId}`);
+        console.log(`🔍 Annulation de l'abonnement Stripe`);
         await stripe.subscriptions.del(subscription.stripeSubscriptionId);
         console.log(`✅ Abonnement Stripe annulé avec succès`);
 
         // Mettre à jour l'abonnement dans la BDD
-        console.log(`🔍 Mise à jour du statut dans la BDD pour ${subscriptionId}`);
+        console.log(`🔍 Mise à jour du statut dans la BDD`);
         const updatedSubscription = await axios.patch(`${BDD_SERVICE_URL}/api/subscriptions/${subscriptionId}`, {
             status: 'cancelled',
             isActive: false
         });
-        console.log(`✅ Statut mis à jour dans la BDD: ${updatedSubscription.data.status}`);
+        console.log(`✅ Statut mis à jour dans la BDD`);
 
         // Envoyer une notification
-        console.log(`🔍 Récupération des informations utilisateur pour ${subscription.userId}`);
+        console.log(`🔍 Récupération des informations utilisateur`);
         const userResponse = await axios.get(`${BDD_SERVICE_URL}/api/users/${subscription.userId}`);
-        console.log(`📧 Envoi d'une notification d'annulation à ${userResponse.data.email}`);
+        console.log(`📧 Envoi d'une notification d'annulation`);
         await axios.post(`${NOTIFICATION_SERVICE_URL}/notifications/subscription/cancelled`, {
             email: userResponse.data.email,
             subscriptionData: updatedSubscription.data

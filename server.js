@@ -1,7 +1,7 @@
 const express = require('express');
 const cors = require('cors');
 const dotenv = require('dotenv');
-const routes = require('./routes');
+const createStripeRoutes = require('./routes');
 const fs = require('fs');
 const path = require('path');
 const axios = require('axios');
@@ -25,6 +25,10 @@ console.log('=======================================');
 
 // Importation de la fonction de création des plans Stripe
 const createStripePlans = require('./controllers/create-stripe-plans');
+
+// Initialiser Stripe
+const stripe = require('stripe')(process.env.STRIPE_SECRET_KEY);
+const stripeService = require('./controllers/stripeService')(stripe); // Injecter Stripe dans le service
 
 const app = express();
 const PORT = process.env.PORT || 3002;
@@ -53,6 +57,17 @@ app.use('/api/payments/webhook', express.raw({ type: 'application/json' }), (req
 
 // Middleware pour parser le JSON pour toutes les autres routes
 app.use(express.json());
+
+// Middleware Prometheus pour collecter les métriques HTTP
+const metricsMiddleware = promBundle({
+  includeMethod: true,
+  includePath: true,
+  includeStatusCode: true,
+  includeUp: true,
+  customLabels: { project_name: 'payment-service' }, // Remplacer par le nom du service
+  promClient: { collectDefaultMetrics: {} }
+});
+app.use(metricsMiddleware);
 
 // Vérifier et créer les plans Stripe si nécessaire
 async function initializeStripe() {
@@ -85,25 +100,16 @@ app.get('/health', (req, res) => {
   });
 });
 
-// Routes
-app.use('/api/payments', routes);
-
-// Middleware Prometheus pour collecter les métriques HTTP
-const metricsMiddleware = promBundle({
-  includeMethod: true,
-  includePath: true,
-  includeStatusCode: true,
-  includeUp: true,
-  customLabels: { project_name: 'payment-service' }, // Remplacer par le nom du service
-  promClient: { collectDefaultMetrics: {} }
-});
-app.use(metricsMiddleware);
+// Créer et utiliser les routes en injectant les dépendances
+const paymentRoutes = createStripeRoutes(stripe, stripeService);
+app.use('/api/payments', paymentRoutes);
 
 // Route pour exposer les métriques Prometheus
 app.get('/metrics', (req, res) => {
   res.set('Content-Type', 'text/plain');
   res.end(promBundle.promClient.register.metrics());
 });
+
 // Initialiser Stripe et démarrer le serveur
 initializeStripe().then(() => {
   app.listen(PORT, () => {
